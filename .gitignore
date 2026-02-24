@@ -1,0 +1,12 @@
+/.env
+/demo
+/get-pip.py
+/linux
+/models
+/python
+/requirements.txt
+/run_demo.bat
+/scripts
+/venv
+/windows
+/__pycache__
