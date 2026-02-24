@@ -30,6 +30,9 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", 5))
 
+# ================= TCP ALERT CONFIG =================
+USR_IP = os.getenv("USR_IP", "127.0.0.1")
+USR_PORT = int(os.getenv("USR_PORT", 9000))
 
 
 MAX_CAMERA_THREADS = 20
@@ -48,8 +51,6 @@ def log(msg):
 
 # ================= TCP ALERT =================
 
-USR_IP = "127.0.0.1"   
-USR_PORT = 9000        
 def send_alert(message):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
