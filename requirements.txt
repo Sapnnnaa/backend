@@ -1,6 +1,11 @@
+flask
+flask-cors
+python-dotenv
 ultralytics==8.1.0
+torch
 opencv-python
 numpy
+mysql-connector-python
 pandas
 matplotlib
 PyYAML
