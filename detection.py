@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ================= CONFIG =================
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.4))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.2))
 EVENT_COOLDOWN = int(os.getenv("EVENT_COOLDOWN", 5))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", 5))
 USE_GPU = os.getenv("USE_GPU", "true").lower() == "true"
