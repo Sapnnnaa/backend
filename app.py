@@ -117,51 +117,90 @@ def event_image(log_id):
 def get_cameras():
     db = get_db_connection()
     cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM addcamera ORDER BY id DESC")
+    cursor.execute("""
+        SELECT 
+            id,
+            camera_name,
+            camera_ip,
+            status,
+            install_date
+        FROM addcamera
+        ORDER BY id DESC
+    """)
     rows = cursor.fetchall()
     cursor.close()
     db.close()
     return jsonify({"success": True, "data": rows})
+
 
 @app.route("/api/cameras", methods=["POST"])
 def add_camera():
     data = request.json
     db = get_db_connection()
     cursor = db.cursor()
+
+    rtsp_url = f"rtsp://{data['camera_username']}:{data['camera_password']}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
+
     cursor.execute("""
-        INSERT INTO addcamera (camera_name, camera_ip, status, date)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO addcamera 
+        (camera_name, camera_username, camera_password, camera_ip, camera_port, rtsp_url, status, install_date)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
-        data["name"],
-        data["ip"],
+        data["camera_name"],
+        data["camera_username"],
+        data["camera_password"],
+        data["camera_ip"],
+        int(data.get("camera_port", 554)),
+        rtsp_url,
         int(data["status"]),
-        data["installDate"]
+        data["install_date"]
     ))
+
     db.commit()
     cursor.close()
     db.close()
-    return jsonify({"success": True})
+
+    return jsonify({"success": True, "message": "Camera added"})
+
 
 @app.route("/api/cameras", methods=["PUT"])
 def update_camera():
     data = request.json
     db = get_db_connection()
     cursor = db.cursor()
+
+    rtsp_url = f"rtsp://{data['camera_username']}:{data['camera_password']}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
+
     cursor.execute("""
         UPDATE addcamera
-        SET camera_name=%s, camera_ip=%s, status=%s, date=%s
+        SET 
+            camera_name=%s,
+            camera_username=%s,
+            camera_password=%s,
+            camera_ip=%s,
+            camera_port=%s,
+            rtsp_url=%s,
+            status=%s,
+            install_date=%s
         WHERE id=%s
     """, (
-        data["name"],
-        data["ip"],
+        data["camera_name"],
+        data["camera_username"],
+        data["camera_password"],
+        data["camera_ip"],
+        int(data.get("camera_port", 554)),
+        rtsp_url,
         int(data["status"]),
-        data["installDate"],
+        data["install_date"],
         data["id"]
     ))
+
     db.commit()
     cursor.close()
     db.close()
-    return jsonify({"success": True})
+
+    return jsonify({"success": True, "message": "Camera updated"})
+
 
 @app.route("/api/cameras", methods=["DELETE"])
 def delete_camera():
@@ -172,7 +211,7 @@ def delete_camera():
     db.commit()
     cursor.close()
     db.close()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "message": "Camera deleted"})
 
 # ================= BOOT =================
 if __name__ == "__main__":
