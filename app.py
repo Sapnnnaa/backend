@@ -15,7 +15,7 @@ API_PORT = int(os.getenv("API_PORT", 5001))
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "S@pna908")
 DB_NAME = os.getenv("DB_NAME", "fire_detection")
 DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", 5))
 
