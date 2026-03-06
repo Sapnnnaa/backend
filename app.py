@@ -15,7 +15,7 @@ API_PORT = int(os.getenv("API_PORT", 5001))
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "S@pna908")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "fire_detection")
 DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", 5))
 
@@ -110,6 +110,54 @@ def event_image(log_id):
     if row and row[0]:
         return Response(row[0], mimetype="image/jpeg")
     return "Not found", 404
+
+#================Alert=======================#
+
+@app.route("/alerts")
+def get_alerts():
+    db = get_db_connection()
+    if not db:
+        return jsonify({"success": False, "data": []})
+
+    cursor = db.cursor(dictionary=True)
+
+    # 1️⃣ Inactive Cameras
+    cursor.execute("""
+        SELECT camera_name
+        FROM addcamera
+        WHERE status = 0
+    """)
+    inactive = cursor.fetchall()
+
+    # 2️⃣ Latest Detection Events (Last 5)
+    cursor.execute("""
+        SELECT cam_name, event_type, detected_at
+        FROM fire_detections
+        ORDER BY detected_at DESC
+        LIMIT 5
+    """)
+    events = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+
+    alerts = []
+
+    # Camera inactive alerts
+    for cam in inactive:
+        alerts.append({
+            "type": "camera_inactive",
+            "message": f"{cam['camera_name']} is INACTIVE"
+        })
+
+    # Detection alerts
+    for e in events:
+        alerts.append({
+            "type": "detection",
+            "message": f"{e['event_type'].upper()} detected in {e['cam_name']}"
+        })
+
+    return jsonify({"success": True, "data": alerts})    
 
 # ================= CAMERAS API =================
 

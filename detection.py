@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ================= CONFIG =================
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.4))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.3))
 EVENT_COOLDOWN = int(os.getenv("EVENT_COOLDOWN", 5))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", 5))
 USE_GPU = os.getenv("USE_GPU", "true").lower() == "true"
@@ -24,7 +24,7 @@ FRAME_SIZE = (
 )
 
 DB_RETRY_DELAY = int(os.getenv("DB_RETRY_DELAY", 5))
-MODEL_PATH = os.getenv("MODEL_PATH", "models/LatestMixed.pt")
+MODEL_PATH = os.getenv("MODEL_PATH", "models/Final.pt")
 
 DB_HOST = os.getenv("DB_HOST")
 DB_USER = os.getenv("DB_USER")
@@ -73,7 +73,7 @@ def get_db_connection():
         log(f"[DB ERROR] {e}")
         return None
 
-# ================= DB STATUS UPDATE =================
+# ================= UPDATE CAMERA STATUS =================
 def update_camera_status(cam_ip, status):
     try:
         conn = get_db_connection()
@@ -146,7 +146,7 @@ def save_to_mysql(cam_name, frame, event_type):
     except Exception as e:
         log(f"[DB ERROR] save_to_mysql(): {e}")
 
-# ================= CAMERA MAP =================
+# ================= BUILD CAMERA MAP =================
 def build_camera_map():
     CAMERA_MAP = {}
     data = fetch_camera()
@@ -178,7 +178,7 @@ def get_device():
         log("[CPU MODE]")
         return "cpu"
 
-# ================= MODEL =================
+# ================= LOAD MODEL =================
 def load_model():
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Model not found: {MODEL_PATH}")
@@ -186,9 +186,9 @@ def load_model():
     log(f"[MODEL] Loading {MODEL_PATH}")
     return YOLO(MODEL_PATH)
 
-# ================= WORKER =================
+# ================= CAMERA WORKER =================
 def camera_worker(cam_source, cam_name, cam_ip, device):
-    model = load_model()  # thread-safe model
+    model = load_model()
     last_event_time = {}
     inactive = False
 
@@ -200,7 +200,6 @@ def camera_worker(cam_source, cam_name, cam_ip, device):
             cap = cv2.VideoCapture(cam_source, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
 
-            # STREAM FAIL
             if not cap.isOpened():
                 log(f"[STREAM DOWN] {cam_name}")
                 if not inactive:
@@ -209,7 +208,6 @@ def camera_worker(cam_source, cam_name, cam_ip, device):
                 time.sleep(RECONNECT_DELAY)
                 continue
 
-            # STREAM RECOVERED
             if inactive:
                 update_camera_status(cam_ip, 1)
                 inactive = False
@@ -227,21 +225,24 @@ def camera_worker(cam_source, cam_name, cam_ip, device):
                         inactive = True
                     break
 
-                if inactive:
-                    update_camera_status(cam_ip, 1)
-                    inactive = False
-
                 frame = cv2.resize(frame, FRAME_SIZE)
 
+                # ================= YOLO DETECTION =================
                 results = model(frame, device=device, verbose=False)
 
                 detected = set()
+
                 for box in results[0].boxes:
                     cls = int(box.cls[0])
                     conf = float(box.conf[0])
+
                     if conf >= CONF_THRESHOLD and cls in CLASS_MAP:
                         detected.add(CLASS_MAP[cls])
 
+                # Auto draw bounding boxes
+                frame = results[0].plot()
+
+                # ================= COOLDOWN SAVE =================
                 now = time.time()
                 for event in detected:
                     last = last_event_time.get(event, 0)
