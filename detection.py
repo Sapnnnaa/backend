@@ -38,6 +38,10 @@ USR_PORT = int(os.getenv("USR_PORT", 9000))
 MAX_CAMERA_THREADS = 20
 stop_event = threading.Event()
 
+# ================= ACTIVE CAMERA TRACKER =================
+ACTIVE_CAMERAS = {}
+CAMERA_REFRESH_INTERVAL = 30   # seconds
+
 CLASS_MAP = {
     0: "fire",
     1: "smoke",
@@ -165,7 +169,8 @@ def build_camera_map():
             "ip": cam_ip
         }
 
-        log(f"[CAMERA REGISTERED] {cam_name} → {cam_source}")
+        if cam_source not in ACTIVE_CAMERAS:
+            log(f"[CAMERA REGISTERED] {cam_name} → {cam_source}")
 
     return CAMERA_MAP
 
@@ -186,9 +191,11 @@ def load_model():
     log(f"[MODEL] Loading {MODEL_PATH}")
     return YOLO(MODEL_PATH)
 
+# ================= LOAD MODEL ONCE =================
+MODEL = load_model()
+
 # ================= CAMERA WORKER =================
 def camera_worker(cam_source, cam_name, cam_ip, device):
-    model = load_model()
     last_event_time = {}
     inactive = False
 
@@ -228,7 +235,7 @@ def camera_worker(cam_source, cam_name, cam_ip, device):
                 frame = cv2.resize(frame, FRAME_SIZE)
 
                 # ================= YOLO DETECTION =================
-                results = model(frame, device=device, verbose=False)
+                results = MODEL(frame, device=device, verbose=False)
 
                 detected = set()
 
@@ -267,27 +274,45 @@ def camera_worker(cam_source, cam_name, cam_ip, device):
 
 # ================= START =================
 def start_detection():
-    CAMERA_MAP = build_camera_map()
+
     device = get_device()
-    threads = []
 
-    for i, (src, cam) in enumerate(CAMERA_MAP.items()):
-        if i >= MAX_CAMERA_THREADS:
-            log("[LIMIT] Max camera threads reached")
-            break
+    def camera_manager():
 
-        t = threading.Thread(
-            target=camera_worker,
-            args=(src, cam["name"], cam["ip"], device),
-            daemon=True
-        )
-        t.start()
+        while not stop_event.is_set():
 
-        threads.append(t)
-        log(f"[THREAD STARTED] {cam['name']}")
+            try:
+                CAMERA_MAP = build_camera_map()
 
-    log(f"[TOTAL RUNNING CAMERAS] {len(threads)}")
-    return threads
+                for src, cam in CAMERA_MAP.items():
+
+                    if src not in ACTIVE_CAMERAS:
+
+                        log(f"[NEW CAMERA DETECTED] {cam['name']}")
+
+                        t = threading.Thread(
+                            target=camera_worker,
+                            args=(src, cam["name"], cam["ip"], device),
+                            daemon=True
+                        )
+
+                        t.start()
+
+                        ACTIVE_CAMERAS[src] = t
+
+                        log(f"[THREAD STARTED] {cam['name']}")
+
+                log(f"[ACTIVE CAMERAS] {len(ACTIVE_CAMERAS)}")
+
+            except Exception as e:
+                log(f"[CAMERA MANAGER ERROR] {e}")
+
+            time.sleep(CAMERA_REFRESH_INTERVAL)
+
+    manager_thread = threading.Thread(target=camera_manager, daemon=True)
+    manager_thread.start()
+
+    return [manager_thread]
 
 # ================= MAIN =================
 if __name__ == "__main__":
