@@ -8,14 +8,15 @@ import traceback
 import mysql.connector
 from ultralytics import YOLO
 from dotenv import load_dotenv
+from urllib.parse import quote
 
-# ================= ENV LOAD =================
 load_dotenv()
 
 # ================= CONFIG =================
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.3))
 EVENT_COOLDOWN = int(os.getenv("EVENT_COOLDOWN", 5))
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", 5))
+DB_RETRY_DELAY = int(os.getenv("DB_RETRY_DELAY", 5))
 USE_GPU = os.getenv("USE_GPU", "true").lower() == "true"
 
 FRAME_SIZE = (
@@ -23,7 +24,6 @@ FRAME_SIZE = (
     int(os.getenv("FRAME_HEIGHT", 480))
 )
 
-DB_RETRY_DELAY = int(os.getenv("DB_RETRY_DELAY", 5))
 MODEL_PATH = os.getenv("MODEL_PATH", "models/Final.pt")
 
 DB_HOST = os.getenv("DB_HOST")
@@ -35,12 +35,13 @@ DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", 5))
 USR_IP = os.getenv("USR_IP", "127.0.0.1")
 USR_PORT = int(os.getenv("USR_PORT", 9000))
 
-MAX_CAMERA_THREADS = 20
+CAMERA_REFRESH_INTERVAL = int(os.getenv("CAMERA_REFRESH_INTERVAL", 10))
+MAX_CAMERA_THREADS = int(os.getenv("MAX_CAMERA_THREADS", 20))
+
 stop_event = threading.Event()
 
-# ================= ACTIVE CAMERA TRACKER =================
+DB_CONNECTED = False
 ACTIVE_CAMERAS = {}
-CAMERA_REFRESH_INTERVAL = 30   # seconds
 
 CLASS_MAP = {
     0: "fire",
@@ -77,21 +78,41 @@ def get_db_connection():
         log(f"[DB ERROR] {e}")
         return None
 
+# ================= DB WATCHER =================
+def db_watcher():
+    global DB_CONNECTED
+    while not stop_event.is_set():
+        conn = get_db_connection()
+        if conn:
+            if not DB_CONNECTED:
+                log("[DB CONNECTED] Cameras can start")
+            DB_CONNECTED = True
+            conn.close()
+        else:
+            if DB_CONNECTED:
+                log("[DB DISCONNECTED] Cameras paused")
+            DB_CONNECTED = False
+        time.sleep(DB_RETRY_DELAY)
+
 # ================= UPDATE CAMERA STATUS =================
 def update_camera_status(cam_ip, status):
     try:
+        if not DB_CONNECTED:
+            return
+
         conn = get_db_connection()
         if conn is None:
             return
 
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE addcamera 
-            SET status = %s, updated_at = CURRENT_TIMESTAMP
-            WHERE camera_ip = %s
-        """, (status, cam_ip))
-        conn.commit()
 
+        cursor.execute("""
+        UPDATE addcamera
+        SET status=%s, updated_at=CURRENT_TIMESTAMP
+        WHERE camera_ip=%s
+        """,(status, cam_ip))
+
+        conn.commit()
         cursor.close()
         conn.close()
 
@@ -103,39 +124,49 @@ def update_camera_status(cam_ip, status):
 
 # ================= FETCH CAMERAS =================
 def fetch_camera():
-    while True:
-        try:
-            conn = get_db_connection()
-            if conn is None:
-                time.sleep(DB_RETRY_DELAY)
-                continue
+    if not DB_CONNECTED:
+        return None
 
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM addcamera ORDER BY id DESC")
-            data = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            return data
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return None
 
-        except Exception as e:
-            log(f"[DB ERROR] fetch_camera(): {e}")
-            time.sleep(DB_RETRY_DELAY)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM addcamera ORDER BY id DESC")
+
+        data = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        return data
+
+    except Exception as e:
+        log(f"[DB ERROR] fetch_camera(): {e}")
+        return None
 
 # ================= SAVE EVENT =================
 def save_to_mysql(cam_name, frame, event_type):
     try:
+        if not DB_CONNECTED:
+            return
+
         conn = get_db_connection()
         if conn is None:
             return
 
         cursor = conn.cursor()
+
         _, buffer = cv2.imencode('.jpg', frame)
 
         sql = """
-            INSERT INTO fire_detections (cam_name, capture_frame, event_type)
-            VALUES (%s, %s, %s)
+        INSERT INTO fire_detections (cam_name,capture_frame,event_type)
+        VALUES (%s,%s,%s)
         """
-        cursor.execute(sql, (cam_name, buffer.tobytes(), event_type))
+
+        cursor.execute(sql,(cam_name,buffer.tobytes(),event_type))
+
         conn.commit()
 
         cursor.close()
@@ -143,6 +174,7 @@ def save_to_mysql(cam_name, frame, event_type):
 
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         alert_msg = f"{timestamp} | CAMERA: {cam_name} | EVENT: {event_type.upper()}"
+
         send_alert(alert_msg)
 
         log(f"[MYSQL] {event_type.upper()} saved from {cam_name}")
@@ -152,30 +184,36 @@ def save_to_mysql(cam_name, frame, event_type):
 
 # ================= BUILD CAMERA MAP =================
 def build_camera_map():
+
     CAMERA_MAP = {}
+
     data = fetch_camera()
 
+    if data is None:
+        return CAMERA_MAP
+
     for row in data:
+
+        cam_id = row["id"]
         cam_ip = str(row["camera_ip"]).strip()
         cam_name = str(row["camera_name"]).strip()
         cam_user = str(row["camera_username"]).strip()
-        cam_pass = str(row["camera_password"]).strip()
+        cam_pass = quote(str(row["camera_password"]).strip())
         cam_port = int(row["camera_port"])
 
-        cam_source = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/stream"
+        rtsp = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/stream"
 
-        CAMERA_MAP[cam_source] = {
+        CAMERA_MAP[cam_id] = {
+            "rtsp": rtsp,
             "name": cam_name,
             "ip": cam_ip
         }
-
-        if cam_source not in ACTIVE_CAMERAS:
-            log(f"[CAMERA REGISTERED] {cam_name} → {cam_source}")
 
     return CAMERA_MAP
 
 # ================= DEVICE =================
 def get_device():
+
     if USE_GPU and torch.cuda.is_available():
         log(f"[GPU] {torch.cuda.get_device_name(0)}")
         return "cuda:0"
@@ -185,143 +223,232 @@ def get_device():
 
 # ================= LOAD MODEL =================
 def load_model():
+
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Model not found: {MODEL_PATH}")
 
     log(f"[MODEL] Loading {MODEL_PATH}")
+
     return YOLO(MODEL_PATH)
 
-# ================= LOAD MODEL ONCE =================
 MODEL = load_model()
 
 # ================= CAMERA WORKER =================
-def camera_worker(cam_source, cam_name, cam_ip, device):
+def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
+
     last_event_time = {}
     inactive = False
+    fail_count = 0
+    MAX_FAIL = 10
 
     desired_fps = 1
     frame_interval = 1.0 / desired_fps
 
-    while not stop_event.is_set():
+    while not stop_event.is_set() and not stop_flag.is_set():
+
         try:
-            cap = cv2.VideoCapture(cam_source, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+
+            if "?" in rtsp:
+                rtsp_url = rtsp + "&rtsp_transport=tcp"
+            else:
+                rtsp_url = rtsp + "?rtsp_transport=tcp"
+
+            log(f"[RTSP URL] {rtsp_url}")
+
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+
+            cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
+            cap.set(cv2.CAP_PROP_FPS,5)
 
             if not cap.isOpened():
+
                 log(f"[STREAM DOWN] {cam_name}")
+
                 if not inactive:
-                    update_camera_status(cam_ip, 0)
-                    inactive = True
+                    update_camera_status(cam_ip,0)
+                    inactive=True
+
                 time.sleep(RECONNECT_DELAY)
                 continue
 
             if inactive:
-                update_camera_status(cam_ip, 1)
-                inactive = False
+                update_camera_status(cam_ip,1)
+                inactive=False
 
             log(f"[STREAM CONNECTED] {cam_name}")
 
-            while not stop_event.is_set():
-                start = time.time()
-                ret, frame = cap.read()
+            while not stop_event.is_set() and not stop_flag.is_set():
+
+                start=time.time()
+
+                ret,frame=cap.read()
 
                 if not ret:
-                    log(f"[STREAM LOST] {cam_name}")
-                    if not inactive:
-                        update_camera_status(cam_ip, 0)
-                        inactive = True
-                    break
 
-                frame = cv2.resize(frame, FRAME_SIZE)
+                    fail_count+=1
 
-                # ================= YOLO DETECTION =================
-                results = MODEL(frame, device=device, verbose=False)
+                    log(f"[FRAME MISS {fail_count}] {cam_name}")
 
-                detected = set()
+                    if fail_count>=MAX_FAIL:
+
+                        log(f"[STREAM LOST] {cam_name}")
+
+                        if not inactive:
+                            update_camera_status(cam_ip,0)
+                            inactive=True
+
+                        break
+
+                    time.sleep(0.2)
+                    continue
+
+                fail_count=0
+
+                frame=cv2.resize(frame,FRAME_SIZE)
+
+                results=MODEL(frame,device=device,verbose=False)
+
+                detected=set()
 
                 for box in results[0].boxes:
-                    cls = int(box.cls[0])
-                    conf = float(box.conf[0])
 
-                    if conf >= CONF_THRESHOLD and cls in CLASS_MAP:
+                    cls=int(box.cls[0])
+                    conf=float(box.conf[0])
+
+                    if conf>=CONF_THRESHOLD and cls in CLASS_MAP:
                         detected.add(CLASS_MAP[cls])
 
-                # Auto draw bounding boxes
-                frame = results[0].plot()
+                frame=results[0].plot()
 
-                # ================= COOLDOWN SAVE =================
-                now = time.time()
+                now=time.time()
+
                 for event in detected:
-                    last = last_event_time.get(event, 0)
-                    if now - last >= EVENT_COOLDOWN:
-                        save_to_mysql(cam_name, frame, event)
-                        last_event_time[event] = now
 
-                elapsed = time.time() - start
-                if elapsed < frame_interval:
-                    time.sleep(frame_interval - elapsed)
+                    last=last_event_time.get(event,0)
+
+                    if now-last>=EVENT_COOLDOWN:
+
+                        save_to_mysql(cam_name,frame,event)
+
+                        last_event_time[event]=now
+
+                elapsed=time.time()-start
+
+                if elapsed<frame_interval:
+                    time.sleep(frame_interval-elapsed)
 
             cap.release()
             time.sleep(RECONNECT_DELAY)
 
         except Exception as e:
+
             log(f"[THREAD ERROR] {cam_name}: {e}")
+
             traceback.print_exc()
+
             if not inactive:
-                update_camera_status(cam_ip, 0)
-                inactive = True
+                update_camera_status(cam_ip,0)
+                inactive=True
+
             time.sleep(RECONNECT_DELAY)
 
-# ================= START =================
-def start_detection():
+# ================= CAMERA MANAGER =================
+def camera_manager():
 
     device = get_device()
 
-    def camera_manager():
+    while not stop_event.is_set():
 
-        while not stop_event.is_set():
+        cameras = build_camera_map()
 
-            try:
-                CAMERA_MAP = build_camera_map()
+        existing_ids = set(ACTIVE_CAMERAS.keys())
+        db_ids = set(cameras.keys())
 
-                for src, cam in CAMERA_MAP.items():
+        removed = existing_ids - db_ids
 
-                    if src not in ACTIVE_CAMERAS:
+        # STOP REMOVED CAMERAS
+        for cam_id in removed:
 
-                        log(f"[NEW CAMERA DETECTED] {cam['name']}")
+            log(f"[REMOVED CAMERA] {cam_id}")
 
-                        t = threading.Thread(
-                            target=camera_worker,
-                            args=(src, cam["name"], cam["ip"], device),
-                            daemon=True
-                        )
+            cam_data = ACTIVE_CAMERAS[cam_id]
 
-                        t.start()
+            cam_data["stop"].set()
 
-                        ACTIVE_CAMERAS[src] = t
+            cam_thread = cam_data["thread"]
 
-                        log(f"[THREAD STARTED] {cam['name']}")
+            if cam_thread.is_alive():
+                log(f"[STOPPING THREAD] {cam_id}")
+                cam_thread.join(timeout=2)
 
-                log(f"[ACTIVE CAMERAS] {len(ACTIVE_CAMERAS)}")
+            del ACTIVE_CAMERAS[cam_id]
 
-            except Exception as e:
-                log(f"[CAMERA MANAGER ERROR] {e}")
+        # START NEW CAMERAS
+        for cam_id, cam in cameras.items():
 
-            time.sleep(CAMERA_REFRESH_INTERVAL)
+            if cam_id not in ACTIVE_CAMERAS:
 
-    manager_thread = threading.Thread(target=camera_manager, daemon=True)
+                if len(ACTIVE_CAMERAS) >= MAX_CAMERA_THREADS:
+                    log("[LIMIT] Max camera threads reached")
+                    continue
+
+                stop_flag = threading.Event()
+
+                t = threading.Thread(
+                    target=camera_worker,
+                    args=(cam["rtsp"], cam["name"], cam["ip"], device, stop_flag),
+                    daemon=True
+                )
+
+                ACTIVE_CAMERAS[cam_id] = {
+                    "thread": t,
+                    "stop": stop_flag
+                }
+
+                log(f"[NEW CAMERA] {cam['name']}")
+
+                t.start()
+
+        log(f"[ACTIVE CAMERAS] {len(ACTIVE_CAMERAS)}")
+
+        time.sleep(CAMERA_REFRESH_INTERVAL)
+
+# ================= START DETECTION =================
+def start_detection():
+
+    threading.Thread(target=db_watcher, daemon=True).start()
+
+    while not DB_CONNECTED:
+
+        log("[WAITING FOR DB]")
+
+        time.sleep(DB_RETRY_DELAY)
+
+    manager_thread = threading.Thread(
+        target=camera_manager,
+        daemon=True
+    )
+
     manager_thread.start()
+
+    log("[CAMERA MANAGER STARTED]")
 
     return [manager_thread]
 
 # ================= MAIN =================
-if __name__ == "__main__":
+if __name__=="__main__":
+
     try:
+
         log("[SYSTEM STARTING]")
+
         start_detection()
+
         while True:
             time.sleep(1)
 
     except KeyboardInterrupt:
+
         log("[SYSTEM STOPPING]")
+
         stop_event.set()
