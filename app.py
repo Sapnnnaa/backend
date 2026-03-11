@@ -5,6 +5,7 @@ import mysql.connector
 from flask import Flask, jsonify, Response, request
 from flask_cors import CORS
 from dotenv import load_dotenv
+from urllib.parse import quote
 from detection import start_detection, stop_event, DB_CONNECTED, ACTIVE_CAMERAS
 
 # ================= ENV =================
@@ -202,9 +203,11 @@ def add_camera():
         if field not in data or not data[field]:
             return jsonify({"success": False, "message": f"{field} required"}), 400
 
+    cam_pass = quote(data["camera_password"])
+
     cursor = db.cursor()
 
-    rtsp_url = f"rtsp://{data['camera_username']}:{data['camera_password']}@{data['camera_ip']}:{data['camera_port']}"
+    rtsp_url = f"rtsp://{data['camera_username']}:{cam_pass}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
 
     cursor.execute("""
         INSERT INTO addcamera 
@@ -242,7 +245,9 @@ def update_camera():
     # if password is provided
     if "camera_password" in data:
 
-        rtsp_url = f"rtsp://{data['camera_username']}:{data['camera_password']}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
+        cam_pass = quote(data["camera_password"])
+
+        rtsp_url = f"rtsp://{data['camera_username']}:{cam_pass}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
 
         cursor.execute("""
             UPDATE addcamera
@@ -282,7 +287,7 @@ def update_camera():
             db.close()
             return jsonify({"success": False, "message": "Camera not found"}), 404
 
-        old_password = row[0]
+        old_password = quote(row[0])
 
         rtsp_url = f"rtsp://{data['camera_username']}:{old_password}@{data['camera_ip']}:{data.get('camera_port',554)}/stream"
 

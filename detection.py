@@ -1,4 +1,5 @@
 import os
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"
 import cv2
 import time
 import torch
@@ -197,11 +198,12 @@ def build_camera_map():
         cam_id = row["id"]
         cam_ip = str(row["camera_ip"]).strip()
         cam_name = str(row["camera_name"]).strip()
-        cam_user = str(row["camera_username"]).strip()
-        cam_pass = quote(str(row["camera_password"]).strip())
-        cam_port = int(row["camera_port"])
 
-        rtsp = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/stream"
+        rtsp = str(row["rtsp_url"]).strip()
+
+        if not rtsp:
+            log(f"[INVALID RTSP] Camera {cam_name}")
+            continue
 
         CAMERA_MAP[cam_id] = {
             "rtsp": rtsp,
@@ -239,7 +241,7 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
     last_event_time = {}
     inactive = False
     fail_count = 0
-    MAX_FAIL = 10
+    MAX_FAIL = 50
 
     desired_fps = 1
     frame_interval = 1.0 / desired_fps
@@ -248,17 +250,13 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
         try:
 
-            if "?" in rtsp:
-                rtsp_url = rtsp + "&rtsp_transport=tcp"
-            else:
-                rtsp_url = rtsp + "?rtsp_transport=tcp"
+            log(f"[CONNECTING CAMERA] {cam_name} ({cam_ip})")
 
-            log(f"[RTSP URL] {rtsp_url}")
+            
 
-            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            cap = cv2.VideoCapture(rtsp, cv2.CAP_FFMPEG)
 
-            cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
-            cap.set(cv2.CAP_PROP_FPS,5)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             if not cap.isOpened():
 
@@ -266,76 +264,85 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
                 if not inactive:
                     update_camera_status(cam_ip,0)
-                    inactive=True
+                    inactive = True
 
                 time.sleep(RECONNECT_DELAY)
                 continue
 
+
             if inactive:
                 update_camera_status(cam_ip,1)
-                inactive=False
+                inactive = False
 
             log(f"[STREAM CONNECTED] {cam_name}")
 
+
             while not stop_event.is_set() and not stop_flag.is_set():
 
-                start=time.time()
+                start = time.time()
 
-                ret,frame=cap.read()
 
-                if not ret:
+                ret, frame = cap.read()
 
-                    fail_count+=1
+                if not ret or frame is None:
+
+                    fail_count += 1
 
                     log(f"[FRAME MISS {fail_count}] {cam_name}")
 
-                    if fail_count>=MAX_FAIL:
+                    if fail_count >= MAX_FAIL:
 
                         log(f"[STREAM LOST] {cam_name}")
 
                         if not inactive:
                             update_camera_status(cam_ip,0)
-                            inactive=True
+                            inactive = True
 
                         break
 
                     time.sleep(0.2)
                     continue
 
-                fail_count=0
 
-                frame=cv2.resize(frame,FRAME_SIZE)
+                if ret and frame is not None:
+                     fail_count = 0
 
-                results=MODEL(frame,device=device,verbose=False)
+                frame = cv2.resize(frame, FRAME_SIZE)
 
-                detected=set()
+                results = MODEL(frame, device=device, verbose=False)
+
+                detected = set()
 
                 for box in results[0].boxes:
 
-                    cls=int(box.cls[0])
-                    conf=float(box.conf[0])
+                    cls = int(box.cls[0])
+                    conf = float(box.conf[0])
 
-                    if conf>=CONF_THRESHOLD and cls in CLASS_MAP:
+                    if conf >= CONF_THRESHOLD and cls in CLASS_MAP:
                         detected.add(CLASS_MAP[cls])
 
-                frame=results[0].plot()
 
-                now=time.time()
+                frame = results[0].plot()
+
+                now = time.time()
 
                 for event in detected:
 
-                    last=last_event_time.get(event,0)
+                    last = last_event_time.get(event,0)
 
-                    if now-last>=EVENT_COOLDOWN:
+                    if now - last >= EVENT_COOLDOWN:
 
-                        save_to_mysql(cam_name,frame,event)
+                        save_to_mysql(cam_name, frame, event)
 
-                        last_event_time[event]=now
+                        last_event_time[event] = now
 
-                elapsed=time.time()-start
 
-                if elapsed<frame_interval:
-                    time.sleep(frame_interval-elapsed)
+                # maintain 1 FPS processing
+                elapsed = time.time() - start
+
+                if elapsed < frame_interval:
+                    time.sleep(frame_interval - elapsed)
+
 
             cap.release()
             time.sleep(RECONNECT_DELAY)
@@ -348,7 +355,7 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
             if not inactive:
                 update_camera_status(cam_ip,0)
-                inactive=True
+                inactive = True
 
             time.sleep(RECONNECT_DELAY)
 
