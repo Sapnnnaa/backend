@@ -6,6 +6,8 @@ import torch
 import socket
 import threading
 import traceback
+import subprocess
+import platform
 import mysql.connector
 from ultralytics import YOLO
 from dotenv import load_dotenv
@@ -37,9 +39,10 @@ USR_IP = os.getenv("USR_IP", "127.0.0.1")
 USR_PORT = int(os.getenv("USR_PORT", 9000))
 
 CAMERA_REFRESH_INTERVAL = int(os.getenv("CAMERA_REFRESH_INTERVAL", 10))
-MAX_CAMERA_THREADS = int(os.getenv("MAX_CAMERA_THREADS", 20))
+MAX_CAMERA_THREADS = int(os.getenv("MAX_CAMERA_THREADS", 50))
 
 stop_event = threading.Event()
+inference_lock = threading.Lock()
 
 DB_CONNECTED = False
 ACTIVE_CAMERAS = {}
@@ -53,6 +56,18 @@ CLASS_MAP = {
 # ================= LOGGER =================
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+# ================= PING CHECK =================
+def ping_camera(ip):
+    # Cross-platform ping command
+    param = '-n' if platform.system().lower() == 'windows' else '-c'
+    timeout_flag = '-w' if platform.system().lower() == 'windows' else '-W'
+    timeout_val = '2000' if platform.system().lower() == 'windows' else '2'
+    command = ['ping', param, '1', timeout_flag, timeout_val, str(ip)]
+    try:
+        return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    except Exception:
+        return False
 
 # ================= TCP ALERT =================
 def send_alert(message):
@@ -252,7 +267,14 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
             log(f"[CONNECTING CAMERA] {cam_name} ({cam_ip})")
 
-            
+            # Industry standard: ping camera before committing to RTSP connection
+            if not ping_camera(cam_ip):
+                log(f"[NETWORK UNREACHABLE] {cam_name} ({cam_ip}) is offline or not responding to ping")
+                if not inactive:
+                    update_camera_status(cam_ip, 0)
+                    inactive = True
+                time.sleep(RECONNECT_DELAY)
+                continue
 
             cap = cv2.VideoCapture(rtsp, cv2.CAP_FFMPEG)
 
@@ -276,19 +298,18 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
             log(f"[STREAM CONNECTED] {cam_name}")
 
+            last_inference_time = 0
 
             while not stop_event.is_set() and not stop_flag.is_set():
 
-                start = time.time()
+                ret = cap.grab()
 
-
-                ret, frame = cap.read()
-
-                if not ret or frame is None:
+                if not ret:
 
                     fail_count += 1
 
-                    log(f"[FRAME MISS {fail_count}] {cam_name}")
+                    if fail_count % 10 == 0:
+                        log(f"[FRAME MISS {fail_count}] {cam_name}")
 
                     if fail_count >= MAX_FAIL:
 
@@ -300,48 +321,52 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
                         break
 
-                    time.sleep(0.2)
+                    time.sleep(0.05)
                     continue
 
 
-                if ret and frame is not None:
-                     fail_count = 0
-
-                frame = cv2.resize(frame, FRAME_SIZE)
-
-                results = MODEL(frame, device=device, verbose=False)
-
-                detected = set()
-
-                for box in results[0].boxes:
-
-                    cls = int(box.cls[0])
-                    conf = float(box.conf[0])
-
-                    if conf >= CONF_THRESHOLD and cls in CLASS_MAP:
-                        detected.add(CLASS_MAP[cls])
-
-
-                frame = results[0].plot()
+                fail_count = 0
 
                 now = time.time()
+                
+                if now - last_inference_time >= frame_interval:
+                    last_inference_time = now
+                    
+                    ret, frame = cap.retrieve()
+                    
+                    if not ret or frame is None:
+                        continue
 
-                for event in detected:
+                    frame = cv2.resize(frame, FRAME_SIZE)
 
-                    last = last_event_time.get(event,0)
+                    # Serialize inference to prevent concurrent memory issues across 40 cameras
+                    with inference_lock:
+                        results = MODEL(frame, device=device, verbose=False)
 
-                    if now - last >= EVENT_COOLDOWN:
+                    detected = set()
 
-                        save_to_mysql(cam_name, frame, event)
+                    for box in results[0].boxes:
 
-                        last_event_time[event] = now
+                        cls = int(box.cls[0])
+                        conf = float(box.conf[0])
+
+                        if conf >= CONF_THRESHOLD and cls in CLASS_MAP:
+                            detected.add(CLASS_MAP[cls])
 
 
-                # maintain 1 FPS processing
-                elapsed = time.time() - start
+                    frame = results[0].plot()
 
-                if elapsed < frame_interval:
-                    time.sleep(frame_interval - elapsed)
+                    current_event_time = time.time()
+
+                    for event in detected:
+
+                        last = last_event_time.get(event,0)
+
+                        if current_event_time - last >= EVENT_COOLDOWN:
+
+                            save_to_mysql(cam_name, frame, event)
+
+                            last_event_time[event] = current_event_time
 
 
             cap.release()
