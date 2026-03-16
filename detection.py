@@ -191,7 +191,7 @@ def save_to_mysql(cam_name, frame, event_type):
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         alert_msg = f"{timestamp} | CAMERA: {cam_name} | EVENT: {event_type.upper()}"
 
-        send_alert(alert_msg)
+        # send_alert(alert_msg)
 
         log(f"[MYSQL] {event_type.upper()} saved from {cam_name}")
 
@@ -278,7 +278,9 @@ def camera_worker(rtsp, cam_name, cam_ip, device, stop_flag):
 
             cap = cv2.VideoCapture(rtsp, cv2.CAP_FFMPEG)
 
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)   # 5s to open
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
 
             if not cap.isOpened():
 
